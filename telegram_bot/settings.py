@@ -26,9 +26,7 @@ SECRET_KEY = 'django-insecure-t3q5hjtwozc&^*-^u0gn&^#@44r3m9dy%5b(j^1v3+oq6o=siz
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    'e6a2-2a0d-5600-19-b000-7123-6cf6-2768-e88d.ngrok-free.app',
-    'localhost',
-    'headlines-podcast-hobby-cigarette.trycloudflare.com'
+    "*"
 ]
 
 CHAT_WEBHOOK = 'https://richardgp.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat'
@@ -50,6 +48,7 @@ GOOGLE_CREDS_PATH = os.path.join(BASE_DIR, "credentials/credentials.json")
 GOOGLE_FOLDER_ID = '1lB2gDxcysBi13WnV4-2_g1FKZx0jskdE'
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -82,13 +81,23 @@ WSGI_APPLICATION = 'telegram_bot.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# Set default values for the environment variables if they’re not already set
+os.environ.setdefault("PGDATABASE", "telegram_bot_db")
+os.environ.setdefault("PGUSER", "rrichard")
+os.environ.setdefault("PGPASSWORD", "1234")
+os.environ.setdefault("PGHOST", "localhost")
+os.environ.setdefault("PGPORT", "5432")
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ["PGDATABASE"],
+        'USER': os.environ["PGUSER"],
+        'PASSWORD': os.environ["PGPASSWORD"],
+        'HOST': os.environ["PGHOST"],
+        'PORT': os.environ["PGPORT"],
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -125,6 +134,9 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
+
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+STATICFILES_DIRS = [os.path.join(BASE_DIR, "static")]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field

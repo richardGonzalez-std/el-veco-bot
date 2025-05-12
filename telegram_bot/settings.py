@@ -29,7 +29,7 @@ ALLOWED_HOSTS = [
     "*"
 ]
 
-CHAT_WEBHOOK = 'https://richardgp.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat'
+CHAT_WEBHOOK = 'https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat'
 # Application definition
 BOT_TOKEN = "7636265328:AAEm61HH_bCM-5zuBIZWbxkZL62T7uBaNnM"
 

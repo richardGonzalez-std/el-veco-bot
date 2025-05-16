@@ -62,24 +62,24 @@ class VerificarClaveView(APIView):
         username = request.data.get("username")
         chat_id = request.data.get("chat_id")
         bot = Bot(token=settings.BOT_TOKEN)
-        if clave_secreta == clave_acceso_bot:
-
+        while clave_secreta !== clave_acceso_bot:
             async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text=f"Atención a la musica! Bienvenido {username} dime que necesitas de mi?",
-                reply_markup=obtener_menu_inline(),
+                chat_id = chat_id,
+                text=f"Verificación de clave incorrecta, intente de nuevo"
             )
+        async_to_sync(bot.send_message)(
+            chat_id=chat_id,
+            text=f"Atención a la musica! Bienvenido {username} dime que necesitas de mi?",
+            reply_markup=obtener_menu_inline(),
+        )
 
-            return Response(
-                {
-                    "respuesta": f"Verificación de clave correcta, {status.HTTP_202_ACCEPTED}"
-                }
-            )
         return Response(
             {
-                "respuesta": f"Verificación de clave incorrecta, {status.HTTP_401_UNAUTHORIZED}"
+                "respuesta": f"Verificación de clave correcta, {status.HTTP_202_ACCEPTED}"
             }
         )
+            
+        
     
 
 def obtener_documentos_google_docs(titulo_busqueda=None):

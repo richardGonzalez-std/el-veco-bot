@@ -67,6 +67,9 @@ class VerificarClaveView(APIView):
                 chat_id = chat_id,
                 text=f"Verificación de clave incorrecta, intente de nuevo"
             )
+            return Response({
+                "respuesta":f"Verificación incorrecta, {status.HTTP_401_UNAUTHORIZED}"
+            })
         async_to_sync(bot.send_message)(
             chat_id=chat_id,
             text=f"Atención a la musica! Bienvenido {username} dime que necesitas de mi?",

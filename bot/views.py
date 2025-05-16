@@ -62,7 +62,7 @@ class VerificarClaveView(APIView):
         username = request.data.get("username")
         chat_id = request.data.get("chat_id")
         bot = Bot(token=settings.BOT_TOKEN)
-        while clave_secreta !== clave_acceso_bot:
+        while clave_secreta != clave_acceso_bot:
             async_to_sync(bot.send_message)(
                 chat_id = chat_id,
                 text=f"Verificación de clave incorrecta, intente de nuevo"

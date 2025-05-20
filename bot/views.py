@@ -10,10 +10,11 @@ import re
 import markdown
 from googleapiclient.errors import HttpError
 from datetime import datetime
+from googleapiclient.http import MediaIoBaseUpload
 import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-
+import io
 SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 
 client = OpenAI(api_key=settings.OPENAI_KEY)
@@ -193,24 +194,24 @@ class SeleccionarTituloGuion(APIView):
         return Response({"seleccion": "recibida"})
 
 
-def crearDocumento(drive_service, docs_service, titulo, contenido):
+def crearDocumento(drive_service, titulo, contenido):
     archivo_metadata = {
         "name": f"{titulo}",
         "mimeType": "application/vnd.google-apps.document",
         "parents": [settings.GOOGLE_FOLDER_ID],
     }
 
-    archivo = drive_service.files().create(body=archivo_metadata, fields="id").execute()
-    documento_id = archivo.get("id")
-
-    # Insertar el contenido
-    docs_service.documents().batchUpdate(
-        documentId=documento_id,
-        body={
-            "requests": [{"insertText": {"location": {"index": 1}, "text": contenido}}]
-        },
-    ).execute()
-    return documento_id
+    media = MediaIoBaseUpload(
+       io.BytesIO(contenido.encode("utf-8")),
+       mimetype="text/html",
+       resumable=True
+   )
+    archivo = (drive_service.files().create(
+        body=archivo_metadata,
+        media_body=media,
+        fields="id",
+    ).execute())
+    return archivo.get("id")
 
 
 class CrearGuionView(APIView):
@@ -244,7 +245,7 @@ class CrearGuionView(APIView):
             nombre_carpeta = folder.get("name", "Carpeta")
             # Crear el título
             if titulo:
-                crearDocumento(drive_service, docs_service, titulo, prompt_content)
+                crearDocumento(drive_service, titulo, prompt_content)
                 # Enviar mensaje informativo al usuario
                 async_to_sync(bot.send_message)(
                     chat_id=chat_id,

@@ -259,7 +259,6 @@ class CrearGuionView(APIView):
             titulo_auto = f"Guión FMSPORTS *{fecha}*"
             crearDocumento(
                 drive_service=drive_service,
-                docs_service=docs_service,
                 titulo=titulo_auto,
                 contenido=prompt_content,
             )

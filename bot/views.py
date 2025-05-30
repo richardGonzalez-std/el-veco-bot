@@ -7,6 +7,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from openai import OpenAI
 from django.conf import settings
 import re
+import time    
 import markdown
 from googleapiclient.errors import HttpError
 from datetime import datetime
@@ -243,6 +244,7 @@ class CrearGuionView(APIView):
                 .execute()
             )
             nombre_carpeta = folder.get("name", "Carpeta")
+            currDate = time.ctime(time.time())
             # Crear el título
             if titulo:
                 crearDocumento(drive_service, titulo, prompt_content)
@@ -253,7 +255,7 @@ class CrearGuionView(APIView):
                     parse_mode="Markdown",
                 )
 
-                return Response({"status": "Documento creado"})
+                return Response({"status": "Documento creado","fileName":f"*{titulo}*","dateCreated":currDate,"folderId":settings.GOOGLE_FOLDER_ID})
 
             fecha = datetime.now().strftime("%Y-%m-%d")
             titulo_auto = f"Guión FMSPORTS *{fecha}*"

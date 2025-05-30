@@ -272,7 +272,7 @@ class CrearGuionView(APIView):
                 parse_mode="Markdown",
             )
 
-            return Response({"status": "Documento creado"})
+            return Response({"status": "Documento creado","fileName":f"*{titulo}*","dateCreated":currDate,"folderId":settings.GOOGLE_FOLDER_ID})
 
         except HttpError as error:
             async_to_sync(bot.send_message)(

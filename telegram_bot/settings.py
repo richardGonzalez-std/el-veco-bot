@@ -26,7 +26,9 @@ SECRET_KEY = 'django-insecure-t3q5hjtwozc&^*-^u0gn&^#@44r3m9dy%5b(j^1v3+oq6o=siz
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    "*"
+    "*",
+    "https://statute-competitive-doll-compatible.trycloudflare.com",
+    "https://candidate-translate-pill-roles.trycloudflare.com"
 ]
 
 CHAT_WEBHOOK = 'https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat'
@@ -82,21 +84,10 @@ WSGI_APPLICATION = 'telegram_bot.wsgi.application'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
 # Set default values for the environment variables if they’re not already set
-os.environ.setdefault("PGDATABASE", "telegram_bot_db")
-os.environ.setdefault("PGUSER", "rrichard")
-os.environ.setdefault("PGPASSWORD", "1234")
-os.environ.setdefault("PGHOST", "localhost")
-os.environ.setdefault("PGPORT", "5432")
+
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ["PGDATABASE"],
-        'USER': os.environ["PGUSER"],
-        'PASSWORD': os.environ["PGPASSWORD"],
-        'HOST': os.environ["PGHOST"],
-        'PORT': os.environ["PGPORT"],
-    }
+
 }
 
 # Password validation

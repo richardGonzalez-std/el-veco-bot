@@ -28,7 +28,8 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "*",
     "https://statute-competitive-doll-compatible.trycloudflare.com",
-    "https://candidate-translate-pill-roles.trycloudflare.com"
+    "https://candidate-translate-pill-roles.trycloudflare.com",
+    "https://el-veco-bot.onrender.com",
 ]
 
 CHAT_WEBHOOK = 'https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat'

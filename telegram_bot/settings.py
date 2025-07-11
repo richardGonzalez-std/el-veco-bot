@@ -36,6 +36,21 @@ CHAT_WEBHOOK = 'https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040
 # Application definition
 BOT_TOKEN = "7636265328:AAEm61HH_bCM-5zuBIZWbxkZL62T7uBaNnM"
 
+# Configuraciones adicionales para settings.py
+
+# Webhook del chat embedded
+CHAT_WEBHOOK_URL = "https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat"
+
+# Configuración del chat
+CHAT_TIMEOUT = 30  # segundos
+CHAT_MAX_RETRIES = 3
+
+# URLs para el webhook del chat (si usas el método web)
+CHAT_WEBHOOK = "https://tu-dominio.com/chat/"  # URL para abrir el chat web
+
+# Configuración de requests
+REQUESTS_TIMEOUT = 30
+REQUESTS_RETRIES = 3
 OPENAI_KEY = "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"
 
 INSTALLED_APPS = [

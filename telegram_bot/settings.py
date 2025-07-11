@@ -46,7 +46,6 @@ CHAT_TIMEOUT = 30  # segundos
 CHAT_MAX_RETRIES = 3
 
 # URLs para el webhook del chat (si usas el método web)
-CHAT_WEBHOOK = "https://tu-dominio.com/chat/"  # URL para abrir el chat web
 
 # Configuración de requests
 REQUESTS_TIMEOUT = 30
@@ -77,21 +76,7 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'telegram_bot.urls'
 
-TEMPLATES = [
-    {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
-            ],
-        },
-    },
-]
+
 
 WSGI_APPLICATION = 'telegram_bot.wsgi.application'
 

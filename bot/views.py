@@ -357,13 +357,13 @@ bot_service = BotService()
 class AuthenticationMixin:
     """Mixin para validación de autenticación"""
     
-    def dispatch(self, request, *args, **kwargs):
+    def dispatch(self, request):
         """Interceptar requests para validar autenticación"""
         chat_id = request.data.get("chat_id")
         
         # Endpoints que no requieren autenticación
         if self.__class__.__name__ in ['BienvenidaView', 'VerificarClaveView']:
-            return super().dispatch(request, *args, **kwargs)
+            return super().dispatch(request)
         
         if not chat_id or not UserSessionManager.is_authenticated(chat_id):
             return Response(
@@ -371,7 +371,7 @@ class AuthenticationMixin:
                 status=status.HTTP_401_UNAUTHORIZED
             )
         
-        return super().dispatch(request, *args, **kwargs)
+        return super().dispatch(request)
 
 
 # --- Vistas principales ---

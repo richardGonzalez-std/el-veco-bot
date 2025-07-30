@@ -19,11 +19,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 
-class BaseAPIView(APIView):
-    """Clase base para todas las vistas API"""
-    parser_classes = [JSONParser, FormParser, MultiPartParser]
 # Configuración de logging
 logger = logging.getLogger(__name__)
 
@@ -358,28 +354,8 @@ class BotService:
 bot_service = BotService()
 
 
-class AuthenticationMixin:
-    """Mixin para validación de autenticación"""
-    
-    def dispatch(self, request):
-        """Interceptar requests para validar autenticación"""
-        chat_id = request.data.get("chat_id")
-        
-        # Endpoints que no requieren autenticación
-        if self.__class__.__name__ in ['BienvenidaView', 'VerificarClaveView']:
-            return super().dispatch(request)
-        
-        if not chat_id or not UserSessionManager.is_authenticated(chat_id):
-            return Response(
-                {"error": "Usuario no autenticado", "action": "require_auth"},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-        
-        return super().dispatch(request)
-
-
 # --- Vistas principales ---
-class BienvenidaView(BaseAPIView):
+class BienvenidaView(APIView):
     """Vista de bienvenida mejorada"""
     
     def post(self, request):
@@ -418,7 +394,7 @@ class BienvenidaView(BaseAPIView):
             )
 
 
-class VerificarClaveView(BaseAPIView):
+class VerificarClaveView(APIView):
     """Vista de verificación de clave mejorada"""
     
     def post(self, request):
@@ -469,7 +445,7 @@ class VerificarClaveView(BaseAPIView):
             )
 
 
-class MostrarMenuView(AuthenticationMixin, BaseAPIView):
+class MostrarMenuView( APIView):
     """Vista de menú principal mejorada"""
     
     def post(self, request):
@@ -493,7 +469,7 @@ class MostrarMenuView(AuthenticationMixin, BaseAPIView):
             )
 
 
-class SolicitarModificar(AuthenticationMixin, BaseAPIView):
+class SolicitarModificar( APIView):
     """Vista para solicitar modificación de guión"""
     
     def post(self, request):
@@ -530,7 +506,7 @@ class SolicitarModificar(AuthenticationMixin, BaseAPIView):
         return Response({"status": "Archivos enviados"})
 
 
-class getFileId(AuthenticationMixin, BaseAPIView):
+class getFileId( APIView):
     """Vista para obtener ID de archivo"""
     
     def post(self, request):
@@ -539,7 +515,7 @@ class getFileId(AuthenticationMixin, BaseAPIView):
         return Response({"id": file_idSplitted})
 
 
-class SoporteInlineView(AuthenticationMixin, BaseAPIView):
+class SoporteInlineView(APIView):
     """Vista de soporte inline conectada a n8n webhook"""
     
     def post(self, request):
@@ -772,7 +748,7 @@ Estás conectado a un asistente IA especializado en FMSPORTS a través de n8n. S
         return Response({"status": "command_processed", "command": command})
 
 
-class SeleccionarTituloGuion(AuthenticationMixin, BaseAPIView):
+class SeleccionarTituloGuion(APIView):
     """Vista para seleccionar título del guión"""
     
     def post(self, request):
@@ -797,7 +773,7 @@ class SeleccionarTituloGuion(AuthenticationMixin, BaseAPIView):
         )
 
 
-class CrearGuionView(AuthenticationMixin, BaseAPIView):
+class CrearGuionView(APIView):
     """Vista para crear guión en Google Drive"""
     
     def post(self, request):
@@ -877,7 +853,7 @@ class CrearGuionView(AuthenticationMixin, BaseAPIView):
             )
 
 
-class PerfilUsuarioView(AuthenticationMixin, BaseAPIView):
+class PerfilUsuarioView(APIView):
     """Vista para mostrar perfil de usuario"""
     
     def post(self, request):
@@ -912,7 +888,7 @@ class PerfilUsuarioView(AuthenticationMixin, BaseAPIView):
         return Response({"status": "profile_sent"})
 
 
-class WebhookStatusView(AuthenticationMixin, BaseAPIView):
+class WebhookStatusView(APIView):
     """Vista para verificar estado del webhook de n8n"""
     
     def post(self, request):
@@ -962,7 +938,7 @@ else '• Verifica tu conexión a internet\\n• Intenta de nuevo en unos minuto
         })
 
 
-class LogoutView(AuthenticationMixin, BaseAPIView):
+class LogoutView(APIView):
     """Vista para cerrar sesión"""
     
     def post(self, request):

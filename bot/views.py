@@ -16,11 +16,19 @@ import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import io
+import requests
+import json
+import logging
+import uuid
+
 SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 
 threads_usuarios = set()
 user_timeout = 7200
 modo_soporte_usuarios = set()
+
+logger = logging.getLogger(__name__)
+
 class MessageTemplates:
     """Plantillas de mensajes más profesionales"""
     
@@ -33,7 +41,6 @@ class MessageTemplates:
     SUPPORT_WELCOME = "🤖 **Soporte IA Inline Activado**\n\nAhora puedes chatear directamente conmigo a través de tu asistente personalizado de n8n.\n\nSimplemente escribe tu consulta y te responderé de inmediato.\n\n💡 **Comandos disponibles:**\n• `/menu` - Volver al menú principal\n• `/help` - Ver ayuda\n• `/status` - Estado del asistente\n\n🎯 **Especialidades:**\n• Ayuda con guiones deportivos\n• Soporte técnico de la plataforma\n• Consultas sobre FMSPORTS"
     
     SESSION_EXPIRED = "⏰ **Sesión expirada**\n\nTu sesión ha caducado por inactividad. Por favor, auténticate nuevamente."
-
 
 
 def obtener_menu_inline():
@@ -116,8 +123,6 @@ class VerificarClaveView(APIView):
             }
         )
             
-        
-    
 
 def obtener_documentos_google_docs(titulo_busqueda=None):
     creds = service_account.Credentials.from_service_account_file(
@@ -186,23 +191,161 @@ class getFileId(APIView):
         file_idSplitted = file_id.replace("archivo_", "")
         return Response({"id": file_idSplitted})
 
+
+# CLASE ACTUALIZADA CON N8N CHAT TRIGGER
 class SoporteGPT(APIView):
     def post(self, request):
         chat_id = request.data.get("chat_id")
         bot = Bot(token=settings.BOT_TOKEN)
+        
+        # Verificar sesión activa
         if not is_session_active(chat_id):
             async_to_sync(bot.send_message)(
                 chat_id=chat_id,
                 text=MessageTemplates.SESSION_EXPIRED
             )
             return Response({"error": "Sesión expirada"}, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Activar modo soporte si no está activo
         if chat_id not in modo_soporte_usuarios:
             modo_soporte_usuarios.add(chat_id)
+            
+            # Enviar mensaje de bienvenida por Telegram
             async_to_sync(bot.send_message)(
                 chat_id=chat_id,
                 text=MessageTemplates.SUPPORT_WELCOME,
             )
-        return Response({"chat Abierto"})
+        
+        # Retornar información para el chat embedded
+        return Response({
+            "chat": "Abierto", 
+            "status": "inline_activated",
+            "webhook_url": settings.WEBHOOK_URL,  # URL del n8n Chat Trigger
+            "session_id": f"support_{chat_id}_{int(time.time())}"
+        })
+
+
+# NUEVA CLASE PARA MANEJAR N8N CHAT TRIGGER
+class N8nChatHandler(APIView):
+    """Maneja la comunicación con n8n Chat Trigger webhook"""
+    
+    def post(self, request):
+        try:
+            chat_id = request.data.get("chat_id")
+            mensaje = request.data.get("message")
+            session_id = request.data.get("session_id", f"support_{chat_id}")
+            
+            if not chat_id or not mensaje:
+                return Response(
+                    {"error": "chat_id y message son requeridos"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Verificar que el chat tenga soporte activo
+            if chat_id not in modo_soporte_usuarios:
+                return Response(
+                    {"error": "Chat no tiene soporte activo"}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Enviar mensaje al n8n Chat Trigger
+            respuesta = self._enviar_a_n8n_chat(mensaje, session_id, chat_id)
+            
+            if respuesta:
+                return Response({
+                    "status": "success",
+                    "response": respuesta.get("output", "Sin respuesta"),
+                    "session_id": respuesta.get("sessionId", session_id)
+                })
+            else:
+                return Response(
+                    {"error": "Error comunicando con n8n"}, 
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+        except Exception as e:
+            logger.error(f"Error en N8nChatHandler: {str(e)}")
+            return Response(
+                {"error": "Error interno"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def _enviar_a_n8n_chat(self, mensaje, session_id, chat_id):
+        """Envía mensaje al n8n Chat Trigger y retorna la respuesta"""
+        try:
+            # Payload en el formato que espera n8n Chat Trigger
+            payload = {
+                "chatInput": mensaje,
+                "sessionId": session_id,
+                "action": "sendMessage",
+                # Datos adicionales para tu workflow
+                "metadata": {
+                    "telegram_chat_id": chat_id,
+                    "platform": "telegram_veco",
+                    "timestamp": time.time()
+                }
+            }
+            
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'VECO-Bot/1.0'
+            }
+            
+            # Si tienes autenticación básica configurada en n8n
+            auth = None
+            if hasattr(settings, 'N8N_WEBHOOK_AUTH'):
+                auth = settings.N8N_WEBHOOK_AUTH  # ('username', 'password')
+            
+            response = requests.post(
+                settings.WEBHOOK_URL,  # Tu n8n Chat Trigger webhook URL
+                json=payload,
+                headers=headers,
+                auth=auth,
+                timeout=30  # n8n puede tardar en responder
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"n8n respondió con status {response.status_code}: {response.text}")
+                return None
+                
+        except requests.RequestException as e:
+            logger.error(f"Error conectando con n8n Chat Trigger: {str(e)}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decodificando respuesta de n8n: {str(e)}")
+            return None
+
+
+# NUEVA CLASE PARA RECIBIR CALLBACKS DE N8N (OPCIONAL)
+class N8nWebhookReceiver(APIView):
+    """Recibe callbacks desde n8n si configuraste respuestas asíncronas"""
+    
+    def post(self, request):
+        try:
+            session_id = request.data.get("sessionId")
+            output = request.data.get("output")
+            chat_id = request.data.get("telegram_chat_id")
+            
+            if chat_id and output:
+                # Enviar respuesta por Telegram si es necesario
+                bot = Bot(token=settings.BOT_TOKEN)
+                async_to_sync(bot.send_message)(
+                    chat_id=chat_id,
+                    text=f"🤖 **Respuesta del asistente:**\n\n{output}",
+                    parse_mode="Markdown"
+                )
+            
+            return Response({"status": "received"})
+            
+        except Exception as e:
+            logger.error(f"Error en N8nWebhookReceiver: {str(e)}")
+            return Response(
+                {"error": "Error procesando callback"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 class SeleccionarTituloGuion(APIView):
     def post(self, request):
@@ -234,6 +377,7 @@ class SeleccionarTituloGuion(APIView):
             ),
         )
         return Response({"seleccion": "recibida"})
+
 
 def crearDocumento(drive_service, titulo, contenido):
     archivo_metadata = {

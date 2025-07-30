@@ -99,7 +99,8 @@ class VerificarClaveView(APIView):
                 text=MessageTemplates.AUTH_FAILED
             )
             return Response({
-                "respuesta":f"Verificación incorrecta, {status.HTTP_401_UNAUTHORIZED}"
+                "respuesta":f"Verificación incorrecta {status.HTTP_401_UNAUTHORIZED}",
+                "status_code": status.HTTP_401_UNAUTHORIZED
             })
         threads_usuarios.add((chat_id,username,time.time()))
         async_to_sync(bot.send_message)(
@@ -110,7 +111,8 @@ class VerificarClaveView(APIView):
 
         return Response(
             {
-                "respuesta": f"Verificación de clave correcta, {status.HTTP_202_ACCEPTED}"
+                "respuesta": f"Verificación de clave correcta, {status.HTTP_202_ACCEPTED}",
+                "status_code": status.HTTP_202_ACCEPTED
             }
         )
             

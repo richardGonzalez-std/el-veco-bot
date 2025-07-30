@@ -196,13 +196,12 @@ class SoporteGPT(APIView):
                 text=MessageTemplates.SESSION_EXPIRED
             )
             return Response({"error": "Sesión expirada"}, status=status.HTTP_401_UNAUTHORIZED)
-        async_to_sync(bot.send_message)(
-            chat_id=chat_id,
-            text="Abrir chat en Linea",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("CHAT IA", url=settings.CHAT_WEBHOOK)]]
-            ),
-        )
+        if chat_id not in modo_soporte_usuarios:
+            modo_soporte_usuarios.add(chat_id)
+            async_to_sync(bot.send_message)(
+                chat_id=chat_id,
+                text=MessageTemplates.SUPPORT_WELCOME,
+            )
         return Response({"chat Abierto"})
 
 class SeleccionarTituloGuion(APIView):

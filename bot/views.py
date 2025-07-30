@@ -1,4 +1,4 @@
-# views.py - Versión final combinada
+# views.py - Versión final corregida
 import logging
 import time
 import io
@@ -9,7 +9,6 @@ from datetime import datetime
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from asgiref.sync import async_to_sync
 from rest_framework import status
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from openai import OpenAI
@@ -325,17 +324,17 @@ class MessageTemplates:
     DOCUMENT_SELECT = "📄 **Selecciona un documento para modificar:**"
 
 
-
-    """Servicio mejorado para operaciones del bot"""
+class BotService:
+    """Servicio síncrono para operaciones del bot"""
     
     def __init__(self):
         self.bot = Bot(token=settings.BOT_TOKEN)
     
-    async def send_message_safe(self, chat_id: int, text: str, **kwargs) -> bool:
-        """Enviar mensaje con manejo de errores"""
+    def  send_message_safe(self, chat_id: int, text: str, **kwargs) -> bool:
+        """Enviar mensaje con manejo de errores (versión síncrona)"""
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+                self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
                 return True
             except Exception as e:
                 logger.warning(f"Intento {attempt + 1} fallido para chat_id {chat_id}: {e}")
@@ -344,14 +343,9 @@ class MessageTemplates:
                     return False
                 time.sleep(10)  # Esperar antes del siguiente intento
         return False
-    
-    def send_message_sync(self, chat_id: int, text: str, **kwargs) -> bool:
-        """Wrapper síncrono para envío de mensajes"""
-        return async_to_sync(self.send_message_safe)(chat_id, text, **kwargs)
 
-
-# Instancia global del servicio de bot
-bot_service = Bot(settings.BOT_TOKEN)
+# Instancia global del servicio de bot (SÍNCRONA)
+bot_service = BotService()
 
 
 # --- Vistas principales ---
@@ -372,14 +366,14 @@ class BienvenidaView(APIView):
             session = UserSessionManager.get_session(chat_id)
             username = session.get('username', 'Usuario')
             
-            success = async_to_sync(bot_service.send_message)(
+            success = bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.AUTH_SUCCESS.format(username=username),
                 reply_markup=TelegramMenuBuilder.get_main_menu(),
                 parse_mode="Markdown"
             )
         else:
-            success = async_to_sync(bot_service.send_message) (
+            success = bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.WELCOME,
                 parse_mode="Markdown"
@@ -411,7 +405,7 @@ class VerificarClaveView(APIView):
         
         # Verificar clave
         if clave_secreta != settings.FMSPORTS_KEY:
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.AUTH_FAILED,
                 parse_mode="Markdown"
@@ -426,7 +420,7 @@ class VerificarClaveView(APIView):
         
         # Crear sesión
         if UserSessionManager.create_session(chat_id, username):
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.AUTH_SUCCESS.format(username=username),
                 reply_markup=TelegramMenuBuilder.get_main_menu(),
@@ -445,15 +439,23 @@ class VerificarClaveView(APIView):
             )
 
 
-class MostrarMenuView( APIView):
+class MostrarMenuView(APIView):
     """Vista de menú principal mejorada"""
     
     def post(self, request):
         chat_id = request.data.get("chat_id")
         session = UserSessionManager.get_session(chat_id)
+        if not session:
+            bot_service.send_message_safe(
+                chat_id=chat_id,
+                text=MessageTemplates.SESSION_EXPIRED,
+                parse_mode="Markdown"
+            )
+            return Response({"status": "session_expired"})
+        
         username = session.get('username', 'Usuario')
         
-        success = async_to_sync(bot_service.send_message)(
+        success = bot_service.send_message_safe(
             chat_id=chat_id,
             text=f"🎭 **¡Hola {username}!**\n\n¿Qué necesitas del VECO hoy?",
             reply_markup=TelegramMenuBuilder.get_main_menu(),
@@ -469,7 +471,7 @@ class MostrarMenuView( APIView):
             )
 
 
-class SolicitarModificar( APIView):
+class SolicitarModificar(APIView):
     """Vista para solicitar modificación de guión"""
     
     def post(self, request):
@@ -485,7 +487,7 @@ class SolicitarModificar( APIView):
         archivos = GoogleDriveService.obtener_documentos(titulo_busqueda=titulo)
 
         if not archivos:
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id, 
                 text=MessageTemplates.DOCUMENT_NOT_FOUND.format(titulo=titulo),
                 parse_mode="Markdown"
@@ -496,7 +498,7 @@ class SolicitarModificar( APIView):
             )
 
         markup = TelegramMenuBuilder.get_document_selection_menu(archivos)
-        async_to_sync(bot_service.send_message)(
+        bot_service.send_message_safe(
             chat_id=chat_id,
             text=MessageTemplates.DOCUMENT_SELECT,
             reply_markup=markup,
@@ -506,7 +508,7 @@ class SolicitarModificar( APIView):
         return Response({"status": "Archivos enviados"})
 
 
-class getFileId( APIView):
+class getFileId(APIView):
     """Vista para obtener ID de archivo"""
     
     def post(self, request):
@@ -528,7 +530,7 @@ class SoporteInlineView(APIView):
             webhook_status = N8nWebhookService.test_webhook_connection()
             
             if not webhook_status:
-                async_to_sync(bot_service.send_message)(
+                bot_service.send_message_safe(
                     chat_id=chat_id,
                     text="❌ **Servicio temporalmente no disponible**\n\nEl asistente IA está experimentando problemas técnicos. Por favor intenta más tarde.",
                     parse_mode="Markdown"
@@ -540,7 +542,7 @@ class SoporteInlineView(APIView):
             
             UserSessionManager.update_session(chat_id, is_support_mode=True)
             
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.SUPPORT_WELCOME,
                 reply_markup=TelegramMenuBuilder.get_support_menu(),
@@ -560,7 +562,7 @@ class SoporteInlineView(APIView):
             # Salir del modo soporte
             UserSessionManager.update_session(chat_id, is_support_mode=False)
             
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text="✅ **Modo soporte desactivado**\n\n¿Necesitas algo más?",
                 reply_markup=TelegramMenuBuilder.get_main_menu(),
@@ -578,6 +580,14 @@ class SoporteInlineView(APIView):
             
             # Obtener información del usuario
             session = UserSessionManager.get_session(chat_id)
+            if not session:
+                bot_service.send_message_safe(
+                    chat_id=chat_id,
+                    text=MessageTemplates.SESSION_EXPIRED,
+                    parse_mode="Markdown"
+                )
+                return Response({"status": "session_expired"})
+                
             username = session.get('username', f'user_{chat_id}')
             
             # Actualizar contador de conversaciones y última actividad
@@ -589,7 +599,7 @@ class SoporteInlineView(APIView):
             )
             
             # Enviar indicador de "escribiendo..."
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text="🤖 _Procesando tu consulta..._",
                 parse_mode="Markdown"
@@ -612,7 +622,7 @@ class SoporteInlineView(APIView):
                 
                 formatted_response = f"🤖 **Asistente VECO:**\n\n{ai_response}"
                 
-                success = async_to_sync(bot_service.send_message)(
+                success = bot_service.send_message_safe(
                     chat_id=chat_id,
                     text=formatted_response,
                     parse_mode="Markdown"
@@ -643,7 +653,7 @@ class SoporteInlineView(APIView):
                 else:
                     response_text = f"❌ **Error técnico**\n\n{error_message}\n\n¿Podrías intentar con una pregunta diferente?"
                 
-                async_to_sync(bot_service.send_message)(
+                bot_service.send_message_safe(
                     chat_id=chat_id,
                     text=response_text,
                     parse_mode="Markdown"
@@ -658,7 +668,7 @@ class SoporteInlineView(APIView):
         except Exception as e:
             logger.error(f"Error procesando mensaje de soporte para chat_id {chat_id}: {e}")
             
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text="💥 **Error interno**\n\nHubo un problema técnico. El equipo ha sido notificado.\n\nPuedes intentar:\n• Reformular tu pregunta\n• Usar `/menu` para volver al menú\n• Contactar soporte técnico",
                 parse_mode="Markdown"
@@ -672,10 +682,17 @@ class SoporteInlineView(APIView):
     def _handle_support_command(self, chat_id: int, command: str) -> Response:
         """Manejar comandos especiales del soporte"""
         session = UserSessionManager.get_session(chat_id)
+        if not session:
+            bot_service.send_message_safe(
+                chat_id=chat_id,
+                text=MessageTemplates.SESSION_EXPIRED,
+                parse_mode="Markdown"
+            )
+            return Response({"status": "session_expired"})
         
         if command == "/menu":
             UserSessionManager.update_session(chat_id, is_support_mode=False)
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text="🔙 Volviendo al menú principal...",
                 reply_markup=TelegramMenuBuilder.get_main_menu()
@@ -707,7 +724,7 @@ Estás conectado a un asistente IA especializado en FMSPORTS a través de n8n. S
 
 ¡Pregunta lo que necesites!
             """
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=help_text,
                 parse_mode="Markdown"
@@ -732,14 +749,14 @@ Estás conectado a un asistente IA especializado en FMSPORTS a través de n8n. S
 {'✅ Todo funcionando correctamente' if webhook_status else '⚠️ Problemas de conectividad detectados'}
             """
             
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=status_text,
                 parse_mode="Markdown"
             )
             
         else:
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=f"❓ Comando desconocido: `{command}`\n\nUsa `/help` para ver comandos disponibles.",
                 parse_mode="Markdown"
@@ -760,7 +777,7 @@ class SeleccionarTituloGuion(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
             
-        async_to_sync(bot_service.send_message)(
+        bot_service.send_message_safe(
             chat_id=chat_id,
             text="¿Cómo deseas nombrar tu guión?",
             reply_markup=TelegramMenuBuilder.get_title_selection_menu(),
@@ -810,7 +827,7 @@ class CrearGuionView(APIView):
             )
             
             # Enviar confirmación
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id,
                 text=MessageTemplates.DOCUMENT_CREATED.format(
                     titulo=titulo,
@@ -830,7 +847,7 @@ class CrearGuionView(APIView):
 
         except HttpError as error:
             error_details = error.content.decode('utf-8') if error.content else str(error)
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id, 
                 text=MessageTemplates.DOCUMENT_ERROR.format(error=error_details),
                 parse_mode="Markdown"
@@ -842,7 +859,7 @@ class CrearGuionView(APIView):
             
         except Exception as e:
             logger.error(f"Error al crear guión: {str(e)}")
-            async_to_sync(bot_service.send_message)(
+            bot_service.send_message_safe(
                 chat_id=chat_id, 
                 text=MessageTemplates.DOCUMENT_ERROR.format(error=str(e)),
                 parse_mode="Markdown"
@@ -859,6 +876,13 @@ class PerfilUsuarioView(APIView):
     def post(self, request):
         chat_id = request.data.get("chat_id")
         session = UserSessionManager.get_session(chat_id)
+        if not session:
+            bot_service.send_message_safe(
+                chat_id=chat_id,
+                text=MessageTemplates.SESSION_EXPIRED,
+                parse_mode="Markdown"
+            )
+            return Response({"status": "session_expired"})
         
         profile_text = f"""
 👤 **Tu Perfil VECO**
@@ -878,7 +902,7 @@ class PerfilUsuarioView(APIView):
             [InlineKeyboardButton("🔙 Volver al menú", callback_data="action:menu")]
         ])
         
-        async_to_sync(bot_service.send_message)(
+        bot_service.send_message_safe(
             chat_id=chat_id,
             text=profile_text,
             reply_markup=keyboard,
@@ -893,13 +917,21 @@ class WebhookStatusView(APIView):
     
     def post(self, request):
         chat_id = request.data.get("chat_id")
+        session = UserSessionManager.get_session(chat_id)
+        if not session:
+            bot_service.send_message_safe(
+                chat_id=chat_id,
+                text=MessageTemplates.SESSION_EXPIRED,
+                parse_mode="Markdown"
+            )
+            return Response({"status": "session_expired"})
         
         # Probar conexión con el webhook
         webhook_status = N8nWebhookService.test_webhook_connection()
         
         # Obtener estadísticas de la sesión
-        session = UserSessionManager.get_session(chat_id)
         conversation_count = session.get('conversation_count', 0)
+        last_activity = session.get('last_activity', 'N/A')
         
         status_text = f"""
 🔗 **Estado del Webhook N8N**
@@ -908,6 +940,7 @@ class WebhookStatusView(APIView):
 **Estado:** {'🟢 Operativo' if webhook_status else '🔴 Sin conexión'}
 **Timeout configurado:** {WEBHOOK_TIMEOUT}s
 **Conversaciones esta sesión:** {conversation_count}
+**Última actividad:** {last_activity}
 
 **Asistente OpenAI:**
 {'✅ Disponible a través de n8n' if webhook_status else '❌ No disponible'}
@@ -924,7 +957,7 @@ else '• Verifica tu conexión a internet\\n• Intenta de nuevo en unos minuto
             [InlineKeyboardButton("🔙 Volver al perfil", callback_data="action:perfil")]
         ])
         
-        async_to_sync(bot_service.send_message)(
+        bot_service.send_message_safe(
             chat_id=chat_id,
             text=status_text,
             reply_markup=keyboard,
@@ -948,7 +981,7 @@ class LogoutView(APIView):
         
         UserSessionManager.destroy_session(chat_id)
         
-        async_to_sync(bot_service.send_message)(
+        bot_service.send_message_safe(
             chat_id=chat_id,
             text=f"👋 **¡Hasta luego {username}!**\n\nTu sesión ha sido cerrada correctamente.\n\nPara volver a usar el VECO, simplemente envía /start",
             parse_mode="Markdown"

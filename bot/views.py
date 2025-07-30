@@ -19,7 +19,11 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 
+class BaseAPIView(APIView):
+    """Clase base para todas las vistas API"""
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 # Configuración de logging
 logger = logging.getLogger(__name__)
 
@@ -375,7 +379,7 @@ class AuthenticationMixin:
 
 
 # --- Vistas principales ---
-class BienvenidaView(APIView):
+class BienvenidaView(BaseAPIView):
     """Vista de bienvenida mejorada"""
     
     def post(self, request):
@@ -414,7 +418,7 @@ class BienvenidaView(APIView):
             )
 
 
-class VerificarClaveView(APIView):
+class VerificarClaveView(BaseAPIView):
     """Vista de verificación de clave mejorada"""
     
     def post(self, request):
@@ -465,7 +469,7 @@ class VerificarClaveView(APIView):
             )
 
 
-class MostrarMenuView(AuthenticationMixin, APIView):
+class MostrarMenuView(AuthenticationMixin, BaseAPIView):
     """Vista de menú principal mejorada"""
     
     def post(self, request):
@@ -489,7 +493,7 @@ class MostrarMenuView(AuthenticationMixin, APIView):
             )
 
 
-class SolicitarModificar(AuthenticationMixin, APIView):
+class SolicitarModificar(AuthenticationMixin, BaseAPIView):
     """Vista para solicitar modificación de guión"""
     
     def post(self, request):
@@ -526,7 +530,7 @@ class SolicitarModificar(AuthenticationMixin, APIView):
         return Response({"status": "Archivos enviados"})
 
 
-class getFileId(AuthenticationMixin, APIView):
+class getFileId(AuthenticationMixin, BaseAPIView):
     """Vista para obtener ID de archivo"""
     
     def post(self, request):
@@ -535,7 +539,7 @@ class getFileId(AuthenticationMixin, APIView):
         return Response({"id": file_idSplitted})
 
 
-class SoporteInlineView(AuthenticationMixin, APIView):
+class SoporteInlineView(AuthenticationMixin, BaseAPIView):
     """Vista de soporte inline conectada a n8n webhook"""
     
     def post(self, request):
@@ -768,7 +772,7 @@ Estás conectado a un asistente IA especializado en FMSPORTS a través de n8n. S
         return Response({"status": "command_processed", "command": command})
 
 
-class SeleccionarTituloGuion(AuthenticationMixin, APIView):
+class SeleccionarTituloGuion(AuthenticationMixin, BaseAPIView):
     """Vista para seleccionar título del guión"""
     
     def post(self, request):
@@ -793,7 +797,7 @@ class SeleccionarTituloGuion(AuthenticationMixin, APIView):
         )
 
 
-class CrearGuionView(AuthenticationMixin, APIView):
+class CrearGuionView(AuthenticationMixin, BaseAPIView):
     """Vista para crear guión en Google Drive"""
     
     def post(self, request):
@@ -873,7 +877,7 @@ class CrearGuionView(AuthenticationMixin, APIView):
             )
 
 
-class PerfilUsuarioView(AuthenticationMixin, APIView):
+class PerfilUsuarioView(AuthenticationMixin, BaseAPIView):
     """Vista para mostrar perfil de usuario"""
     
     def post(self, request):
@@ -908,7 +912,7 @@ class PerfilUsuarioView(AuthenticationMixin, APIView):
         return Response({"status": "profile_sent"})
 
 
-class WebhookStatusView(AuthenticationMixin, APIView):
+class WebhookStatusView(AuthenticationMixin, BaseAPIView):
     """Vista para verificar estado del webhook de n8n"""
     
     def post(self, request):
@@ -958,7 +962,7 @@ else '• Verifica tu conexión a internet\\n• Intenta de nuevo en unos minuto
         })
 
 
-class LogoutView(AuthenticationMixin, APIView):
+class LogoutView(AuthenticationMixin, BaseAPIView):
     """Vista para cerrar sesión"""
     
     def post(self, request):

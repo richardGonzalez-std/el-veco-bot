@@ -350,7 +350,7 @@ class BotService:
                 if attempt == MAX_RETRY_ATTEMPTS - 1:
                     logger.error(f"Error enviando mensaje después de {MAX_RETRY_ATTEMPTS} intentos: {e}")
                     return False
-                time.sleep(1)  # Esperar antes del siguiente intento
+                time.sleep(10)  # Esperar antes del siguiente intento
         return False
     
     def send_message_sync(self, chat_id: int, text: str, **kwargs) -> bool:

@@ -1,457 +1,509 @@
-# views.py
+# views.py - Versión final combinada
+import logging
+import time
+import io
+
+import requests
+from typing import Dict, List, Optional
+from datetime import datetime
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from asgiref.sync import async_to_sync
 from rest_framework import status
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from openai import OpenAI
-import requests
-import json
-from rest_framework.decorators import api_view
-from django.http import JsonResponse
 from django.conf import settings
-import re
-import time    
-import markdown
+from django.core.cache import cache
 from googleapiclient.errors import HttpError
-from datetime import datetime
 from googleapiclient.http import MediaIoBaseUpload
-import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import io
-import logging
 
-# Configurar logging
+# Configuración de logging
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
+# URLs de webhook
+N8N_CHAT_WEBHOOK_URL = "https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat"
 
+# Constantes para cache y timeouts
+CACHE_TIMEOUT = 3600  # 1 hora
+USER_SESSION_TIMEOUT = 7200  # 2 horas
+MAX_RETRY_ATTEMPTS = 3
+WEBHOOK_TIMEOUT = 30  # Timeout para requests al webhook
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+# Cliente OpenAI (mantenido para otras funciones si es necesario)
 client = OpenAI(api_key=settings.OPENAI_KEY)
-threads_usuarios = set()
-modo_soporte_usuarios = set()
-clave_acceso_bot = "FMSPORTS2025"
 
-# URL del webhook para chat embedded
-CHAT_WEBHOOK_URL = "https://conexionai.app.n8n.cloud/webhook/2305f427-849e-4111-a040-25e5de928328/chat"
-
-def obtener_menu_inline():
-    """
-    Menú principal con todas las opciones incluyendo chat embedded
-    """
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🎬 Generar guion", callback_data="guion")],
-            [InlineKeyboardButton("✏️ Modificar guion", callback_data="modificar")],
-            [InlineKeyboardButton("🤖 Chat IA Directo", callback_data="chat_directo")],
-        ]
-    )
-
-class MostrarMenuView(APIView):
-    def post(self, request):
-        chat_id = request.data.get("chat_id")
-        bot = Bot(token=settings.BOT_TOKEN)
-        async_to_sync(bot.send_message)(
-            chat_id,
-            text="Atención a la música, aquí el VECO, ¿qué necesitas de mi?",
-            reply_markup=obtener_menu_inline(),
+# --- Servicios y utilidades ---
+class GoogleDriveService:
+    """Servicio para operaciones con Google Drive"""
+    
+    @staticmethod
+    def get_service():
+        """Obtener servicio autenticado de Google Drive"""
+        creds = service_account.Credentials.from_service_account_file(
+            settings.GOOGLE_CREDS_PATH,
+            scopes=SCOPES
         )
-        return Response({"respuesta": "Menú enviado"})
+        return build('drive', 'v3', credentials=creds)
+    
+    @staticmethod
+    def obtener_documentos(titulo_busqueda: str = None) -> List[Dict]:
+        """Obtener documentos de Google Drive con paginación"""
+        service = GoogleDriveService.get_service()
+        query = f"'{settings.GOOGLE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.document'"
+        
+        if titulo_busqueda:
+            query += f" and name contains '{titulo_busqueda}'"
+        
+        archivos = []
+        page_token = None
+        
+        while True:
+            response = service.files().list(
+                q=query,
+                spaces='drive',
+                fields='nextPageToken, files(id, name)',
+                pageToken=page_token
+            ).execute()
+            
+            archivos.extend(response.get('files', []))
+            page_token = response.get('nextPageToken', None)
+            
+            if page_token is None:
+                break
+        
+        return archivos
+    
+    @staticmethod
+    def crear_documento(titulo: str, contenido: str) -> str:
+        """Crear nuevo documento en Google Drive"""
+        service = GoogleDriveService.get_service()
+        archivo_metadata = {
+            "name": titulo,
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": [settings.GOOGLE_FOLDER_ID],
+        }
 
-class ChatEmbeddedView(APIView):
-    """
-    Vista para manejar conversaciones directamente con el webhook de n8n
-    """
-    def post(self, request):
-        chat_id = request.data.get("chat_id")
-        message = request.data.get("message")
-        user_id = request.data.get("user_id", chat_id)
+        media = MediaIoBaseUpload(
+            io.BytesIO(contenido.encode("utf-8")),
+            mimetype="text/html",
+            resumable=True
+        )
         
-        if not chat_id or not message:
-            return Response(
-                {"error": "chat_id y message son requeridos"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        archivo = service.files().create(
+            body=archivo_metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
         
+        return archivo.get("id")
+
+
+class N8nWebhookService:
+    """Servicio para interactuar con el webhook de n8n"""
+    
+    @staticmethod
+    def send_chat_message(chat_id: int, message: str, username: str = None) -> Dict:
+        """Enviar mensaje al webhook de n8n y obtener respuesta"""
         try:
-            # Preparar datos para enviar al webhook
-            webhook_data = {
+            payload = {
+                "chat_id": chat_id,
                 "message": message,
-                "user_id": str(user_id),
-                "chat_id": str(chat_id),
-                "timestamp": datetime.now().isoformat(),
-                "source": "telegram_bot"
+                "username": username or f"user_{chat_id}",
+                "timestamp": datetime.now().isoformat()
             }
             
-            logger.info(f"Enviando mensaje al webhook: {webhook_data}")
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "VECO-Bot/1.0"
+            }
             
-            # Enviar mensaje al webhook de n8n
+            logger.info(f"Enviando mensaje a n8n webhook para chat_id: {chat_id}")
+            
             response = requests.post(
-                CHAT_WEBHOOK_URL,
-                json=webhook_data,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "VECO-Bot/1.0"
-                },
-                timeout=30
+                N8N_CHAT_WEBHOOK_URL,
+                json=payload,
+                headers=headers,
+                timeout=WEBHOOK_TIMEOUT
             )
             
-            logger.info(f"Respuesta del webhook: {response.status_code} - {response.text}")
+            response.raise_for_status()
             
-            if response.status_code == 200:
-                try:
-                    # Obtener respuesta del webhook
-                    webhook_response = response.json()
-                    ai_response = webhook_response.get("response", webhook_response.get("message", "No se pudo obtener respuesta de la IA"))
-                    
-                    # Si la respuesta es un string, usarla directamente
-                    if isinstance(webhook_response, str):
-                        ai_response = webhook_response
-                    
-                except json.JSONDecodeError:
-                    # Si no es JSON, usar el texto plano
-                    ai_response = response.text
-                
-                # Enviar respuesta al usuario via Telegram
-                bot = Bot(token=settings.BOT_TOKEN)
-                
-                # Truncar mensaje si es muy largo (Telegram tiene límite de 4096 caracteres)
-                if len(ai_response) > 4000:
-                    ai_response = ai_response[:4000] + "...\n\n_Mensaje truncado por longitud_"
-                
-                async_to_sync(bot.send_message)(
-                    chat_id=chat_id,
-                    text=ai_response,
-                    parse_mode="Markdown"
-                )
-                
-                return Response({
-                    "status": "success",
-                    "ai_response": ai_response,
-                    "webhook_status": response.status_code
-                })
-            else:
-                # Manejar errores del webhook
-                bot = Bot(token=settings.BOT_TOKEN)
-                async_to_sync(bot.send_message)(
-                    chat_id=chat_id,
-                    text="❌ Error al conectar con el asistente de IA. Inténtalo de nuevo."
-                )
-                
-                return Response(
-                    {"error": f"Webhook error: {response.status_code}"},
-                    status=status.HTTP_502_BAD_GATEWAY
-                )
-                
+            result = response.json()
+            logger.info(f"Respuesta recibida de n8n para chat_id: {chat_id}")
+            
+            return {
+                "success": True,
+                "response": result.get("response", "Sin respuesta del asistente"),
+                "data": result
+            }
+            
         except requests.exceptions.Timeout:
-            bot = Bot(token=settings.BOT_TOKEN)
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="⏱️ El asistente está tardando en responder. Inténtalo de nuevo en unos momentos."
+            logger.error(f"Timeout al conectar con n8n webhook para chat_id: {chat_id}")
+            return {
+                "success": False,
+                "error": "timeout",
+                "message": "El asistente está tardando en responder. Intenta de nuevo."
+            }
+            
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Error de conexión con n8n webhook para chat_id: {chat_id}")
+            return {
+                "success": False,
+                "error": "connection_error",
+                "message": "No se pudo conectar con el asistente. Intenta más tarde."
+            }
+            
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Error HTTP {e.response.status_code} en n8n webhook para chat_id: {chat_id}")
+            return {
+                "success": False,
+                "error": "http_error",
+                "message": f"Error del servidor del asistente ({e.response.status_code}). Intenta más tarde."
+            }
+            
+        except Exception as e:
+            logger.error(f"Error inesperado en n8n webhook para chat_id {chat_id}: {e}")
+            return {
+                "success": False,
+                "error": "unknown_error",
+                "message": "Error técnico del asistente. Contacta al administrador."
+            }
+    
+    @staticmethod
+    def test_webhook_connection() -> bool:
+        """Probar la conexión con el webhook"""
+        try:
+            test_payload = {
+                "chat_id": 0,
+                "message": "test_connection",
+                "username": "system_test",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            response = requests.post(
+                N8N_CHAT_WEBHOOK_URL,
+                json=test_payload,
+                timeout=10
             )
             
-            return Response(
-                {"error": "Timeout al conectar con el webhook"},
-                status=status.HTTP_408_REQUEST_TIMEOUT
-            )
+            return response.status_code == 200
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error en ChatEmbeddedView: {str(e)}")
-            bot = Bot(token=settings.BOT_TOKEN)
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="❌ Error de conexión con el asistente de IA."
-            )
-            
-            return Response(
-                {"error": f"Error de conexión: {str(e)}"},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
+        except Exception as e:
+            logger.error(f"Error probando conexión webhook: {e}")
+            return False
 
-class ChatSesionView(APIView):
-    """
-    Vista para manejar sesiones de chat continuas
-    """
+
+class UserSessionManager:
+    """Gestor de sesiones de usuario robusto"""
+    
+    @staticmethod
+    def create_session(chat_id: int, username: str) -> bool:
+        """Crear sesión de usuario con timeout"""
+        try:
+            session_data = {
+                'username': username,
+                'created_at': datetime.now().isoformat(),
+                'is_support_mode': False,
+                'conversation_count': 0,
+                'last_activity': datetime.now().isoformat()
+            }
+            cache.set(f"user_session_{chat_id}", session_data, USER_SESSION_TIMEOUT)
+            logger.info(f"Sesión creada para usuario {username} (chat_id: {chat_id})")
+            return True
+        except Exception as e:
+            logger.error(f"Error creando sesión: {e}")
+            return False
+    
+    @staticmethod
+    def get_session(chat_id: int) -> Optional[Dict]:
+        """Obtener sesión de usuario"""
+        return cache.get(f"user_session_{chat_id}")
+    
+    @staticmethod
+    def is_authenticated(chat_id: int) -> bool:
+        """Verificar si el usuario está autenticado"""
+        session = UserSessionManager.get_session(chat_id)
+        return session is not None
+    
+    @staticmethod
+    def update_session(chat_id: int, **kwargs) -> bool:
+        """Actualizar datos de sesión"""
+        try:
+            session = UserSessionManager.get_session(chat_id)
+            if session:
+                session.update(kwargs)
+                session['last_activity'] = datetime.now().isoformat()
+                cache.set(f"user_session_{chat_id}", session, USER_SESSION_TIMEOUT)
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error actualizando sesión: {e}")
+            return False
+    
+    @staticmethod
+    def destroy_session(chat_id: int) -> bool:
+        """Destruir sesión de usuario"""
+        try:
+            cache.delete(f"user_session_{chat_id}")
+            logger.info(f"Sesión destruida para chat_id: {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error destruyendo sesión: {e}")
+            return False
+
+
+class TelegramMenuBuilder:
+    """Constructor de menús de Telegram flexible"""
+    
+    @staticmethod
+    def get_main_menu() -> InlineKeyboardMarkup:
+        """Menú principal mejorado"""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Generar guion", callback_data="action:guion")],
+            [InlineKeyboardButton("✏️ Modificar guion", callback_data="action:modificar")],
+            [InlineKeyboardButton("🤖 Soporte IA Inline", callback_data="action:soporte_inline")],
+            [InlineKeyboardButton("📊 Mi perfil", callback_data="action:perfil")],
+            [InlineKeyboardButton("🚪 Cerrar sesión", callback_data="action:logout")]
+        ])
+    
+    @staticmethod
+    def get_support_menu() -> InlineKeyboardMarkup:
+        """Menú de soporte inline"""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Chat rápido", callback_data="support:quick_chat")],
+            [InlineKeyboardButton("📝 Ayuda con guiones", callback_data="support:script_help")],
+            [InlineKeyboardButton("🔧 Soporte técnico", callback_data="support:tech_help")],
+            [InlineKeyboardButton("🔙 Volver al menú", callback_data="action:menu")]
+        ])
+    
+    @staticmethod
+    def get_auth_menu() -> InlineKeyboardMarkup:
+        """Menú de autenticación"""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔐 Ingresar clave", callback_data="auth:enter_key")],
+            [InlineKeyboardButton("❓ ¿Olvidaste tu clave?", callback_data="auth:forgot_key")]
+        ])
+    
+    @staticmethod
+    def get_document_selection_menu(archivos: List[Dict]) -> InlineKeyboardMarkup:
+        """Menú para selección de documentos"""
+        botones = [
+            [InlineKeyboardButton(archivo["name"], callback_data=f"archivo_{archivo['id']}")]
+            for archivo in archivos
+        ]
+        return InlineKeyboardMarkup(botones)
+    
+    @staticmethod
+    def get_title_selection_menu() -> InlineKeyboardMarkup:
+        """Menú para selección de título"""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏷 Nombre personalizado", callback_data="nombre_personalizado")],
+            [InlineKeyboardButton("🤖 Nombre automático", callback_data="nombre_default")]
+        ])
+
+
+class MessageTemplates:
+    """Plantillas de mensajes profesionales"""
+    
+    WELCOME = "🎭 **¡Bienvenido al VECO!**\n\nSoy tu asistente para la creación y gestión de guiones deportivos.\n\nPara comenzar, necesito que te autentiques:"
+    
+    AUTH_SUCCESS = "✅ **¡Autenticación exitosa!**\n\n¡Hola {username}! Ya puedes usar todas las funciones del VECO."
+    
+    AUTH_FAILED = "❌ **Clave incorrecta**\n\nPor favor, verifica tu clave e intenta nuevamente."
+    
+    SUPPORT_WELCOME = "🤖 **Soporte IA Inline Activado**\n\nAhora puedes chatear directamente conmigo a través de tu asistente personalizado de n8n.\n\nSimplemente escribe tu consulta y te responderé de inmediato.\n\n💡 **Comandos disponibles:**\n• `/menu` - Volver al menú principal\n• `/help` - Ver ayuda\n• `/status` - Estado del asistente\n\n🎯 **Especialidades:**\n• Ayuda con guiones deportivos\n• Soporte técnico de la plataforma\n• Consultas sobre FMSPORTS"
+    
+    SESSION_EXPIRED = "⏰ **Sesión expirada**\n\nTu sesión ha caducado por inactividad. Por favor, auténticate nuevamente."
+    
+    DOCUMENT_CREATED = (
+        "✅ **Guión creado exitosamente!**\n\n"
+        "• 📄 Título: {titulo}\n"
+        "• 📂 Carpeta: {carpeta}\n"
+        "• 🕒 Fecha: {fecha}"
+    )
+    
+    DOCUMENT_ERROR = "❌ **Error al crear guión**\n\n{error}\n\nPor favor intenta nuevamente o contacta a soporte."
+    
+    DOCUMENT_NOT_FOUND = "⚠️ **Documento no encontrado**\n\nNo se encontró ningún documento con el título: `{titulo}`"
+    
+    DOCUMENT_SELECT = "📄 **Selecciona un documento para modificar:**"
+
+
+class BotService:
+    """Servicio mejorado para operaciones del bot"""
+    
+    def __init__(self):
+        self.bot = Bot(token=settings.BOT_TOKEN)
+    
+    async def send_message_safe(self, chat_id: int, text: str, **kwargs) -> bool:
+        """Enviar mensaje con manejo de errores"""
+        for attempt in range(MAX_RETRY_ATTEMPTS):
+            try:
+                await self.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+                return True
+            except Exception as e:
+                logger.warning(f"Intento {attempt + 1} fallido para chat_id {chat_id}: {e}")
+                if attempt == MAX_RETRY_ATTEMPTS - 1:
+                    logger.error(f"Error enviando mensaje después de {MAX_RETRY_ATTEMPTS} intentos: {e}")
+                    return False
+                time.sleep(1)  # Esperar antes del siguiente intento
+        return False
+    
+    def send_message_sync(self, chat_id: int, text: str, **kwargs) -> bool:
+        """Wrapper síncrono para envío de mensajes"""
+        return async_to_sync(self.send_message_safe)(chat_id, text, **kwargs)
+
+
+# Instancia global del servicio de bot
+bot_service = BotService()
+
+
+class AuthenticationMixin:
+    """Mixin para validación de autenticación"""
+    
+    def dispatch(self, request, *args, **kwargs):
+        """Interceptar requests para validar autenticación"""
+        chat_id = request.data.get("chat_id")
+        
+        # Endpoints que no requieren autenticación
+        if self.__class__.__name__ in ['BienvenidaView', 'VerificarClaveView']:
+            return super().dispatch(request, *args, **kwargs)
+        
+        if not chat_id or not UserSessionManager.is_authenticated(chat_id):
+            return Response(
+                {"error": "Usuario no autenticado", "action": "require_auth"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        return super().dispatch(request, *args, **kwargs)
+
+
+# --- Vistas principales ---
+class BienvenidaView(APIView):
+    """Vista de bienvenida mejorada"""
+    
     def post(self, request):
         chat_id = request.data.get("chat_id")
-        action = request.data.get("action")  # 'start', 'end', 'status'
         
-        bot = Bot(token=settings.BOT_TOKEN)
-        
-        if action == "start":
-            # Agregar usuario al modo soporte
-            modo_soporte_usuarios.add(chat_id)
-            
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="🤖 *Modo Chat IA Activado*\n\n"
-                     "Ahora puedes enviar mensajes directamente y recibirás respuestas de la IA.\n\n"
-                     "Para salir del modo chat, envía: `/salir_chat`\n"
-                     "Para ver el menú, envía: `/menu`",
-                parse_mode="Markdown"
-            )
-            
-            return Response({"status": "Chat session started"})
-            
-        elif action == "end":
-            # Remover usuario del modo soporte
-            modo_soporte_usuarios.discard(chat_id)
-            
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="✅ *Modo Chat IA Desactivado*\n\n"
-                     "Has salido del modo chat. Usa el menú para acceder a otras funciones.",
-                parse_mode="Markdown",
-                reply_markup=obtener_menu_inline()
-            )
-            
-            return Response({"status": "Chat session ended"})
-            
-        elif action == "status":
-            is_active = chat_id in modo_soporte_usuarios
-            return Response({
-                "chat_active": is_active,
-                "chat_id": chat_id
-            })
-            
-        return Response(
-            {"error": "Acción no válida"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-class ManejarMensajesChatView(APIView):
-    """
-    Vista para manejar mensajes cuando el usuario está en modo chat
-    """
-    def post(self, request):
-        chat_id = request.data.get("chat_id")
-        message = request.data.get("message")
-        user_id = request.data.get("user_id", chat_id)
-        
-        if not chat_id or not message:
+        if not chat_id:
             return Response(
-                {"error": "chat_id y message son requeridos"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        
-        # Verificar si el usuario está en modo chat
-        if chat_id not in modo_soporte_usuarios:
-            return Response(
-                {"error": "Usuario no está en modo chat"},
+                {"error": "chat_id es requerido"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Verificar comandos especiales
-        if message.lower() in ['/salir_chat', '/exit', '/quit']:
-            # Crear objeto request simulado para ChatSesionView
-            mock_request = type('MockRequest', (), {
-                'data': {'chat_id': chat_id, 'action': 'end'}
-            })()
-            return ChatSesionView().post(mock_request)
-        
-        if message.lower() == '/menu':
-            bot = Bot(token=settings.BOT_TOKEN)
-            async_to_sync(bot.send_message)(
+        # Verificar si ya está autenticado
+        if UserSessionManager.is_authenticated(chat_id):
+            session = UserSessionManager.get_session(chat_id)
+            username = session.get('username', 'Usuario')
+            
+            success = bot_service.send_message_sync(
                 chat_id=chat_id,
-                text="Aquí tienes el menú (seguirás en modo chat):",
-                reply_markup=obtener_menu_inline()
+                text=MessageTemplates.AUTH_SUCCESS.format(username=username),
+                reply_markup=TelegramMenuBuilder.get_main_menu(),
+                parse_mode="Markdown"
             )
-            return Response({"status": "menu_sent"})
+        else:
+            success = bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=MessageTemplates.WELCOME,
+                reply_markup=TelegramMenuBuilder.get_auth_menu(),
+                parse_mode="Markdown"
+            )
         
-        # Enviar mensaje al chat embedded
-        chat_view = ChatEmbeddedView()
-        # Actualizar los datos del request
-        request.data['user_id'] = user_id
-        return chat_view.post(request)
+        if success:
+            return Response({"status": "welcome_sent"})
+        else:
+            return Response(
+                {"error": "Error enviando mensaje de bienvenida"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-class TelegramWebhookView(APIView):
-    """
-    Vista principal para manejar todas las actualizaciones de Telegram
-    """
-    def post(self, request):
-        update = request.data
-        
-        try:
-            # Manejar mensajes de texto
-            if 'message' in update:
-                message = update['message']
-                chat_id = message['chat']['id']
-                user_id = message['from']['id']
-                text = message.get('text', '')
-                
-                # Verificar si el usuario está en modo chat
-                if chat_id in modo_soporte_usuarios:
-                    # Procesar como mensaje de chat
-                    mock_request = type('MockRequest', (), {
-                        'data': {
-                            'chat_id': chat_id,
-                            'message': text,
-                            'user_id': user_id
-                        }
-                    })()
-                    
-                    chat_view = ManejarMensajesChatView()
-                    return chat_view.post(mock_request)
-                
-                # Manejar comandos especiales
-                if text.startswith('/'):
-                    return self.handle_command(chat_id, text)
-                
-                # Respuesta por defecto
-                bot = Bot(token=settings.BOT_TOKEN)
-                async_to_sync(bot.send_message)(
-                    chat_id=chat_id,
-                    text="Usa el menú para interactuar conmigo 👇",
-                    reply_markup=obtener_menu_inline()
-                )
-                
-            # Manejar callback queries (botones inline)
-            elif 'callback_query' in update:
-                return self.handle_callback_query(update['callback_query'])
-                
-        except Exception as e:
-            logger.error(f"Error en TelegramWebhookView: {str(e)}")
-            return Response({"error": "Internal server error"}, status=500)
-        
-        return Response({"status": "ok"})
-    
-    def handle_command(self, chat_id, command):
-        """Manejar comandos especiales"""
-        bot = Bot(token=settings.BOT_TOKEN)
-        
-        if command == '/start':
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="¡Hola! Soy el VECO. Usa el menú para interactuar conmigo.",
-                reply_markup=obtener_menu_inline()
-            )
-        elif command == '/menu':
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="Aquí tienes el menú principal:",
-                reply_markup=obtener_menu_inline()
-            )
-        elif command == '/chat':
-            # Activar modo chat directo
-            mock_request = type('MockRequest', (), {
-                'data': {'chat_id': chat_id, 'action': 'start'}
-            })()
-            chat_view = ChatSesionView()
-            return chat_view.post(mock_request)
-        
-        return Response({"status": "command_handled"})
-    
-    def handle_callback_query(self, callback_query):
-        """Manejar callbacks de botones inline"""
-        chat_id = callback_query['message']['chat']['id']
-        data = callback_query['data']
-        
-        bot = Bot(token=settings.BOT_TOKEN)
-        
-        # Responder al callback query
-        async_to_sync(bot.answer_callback_query)(
-            callback_query_id=callback_query['id']
-        )
-        
-        # Procesar según el callback
-        if data == "chat_directo":
-            # Activar modo chat directo
-            mock_request = type('MockRequest', (), {
-                'data': {'chat_id': chat_id, 'action': 'start'}
-            })()
-            chat_view = ChatSesionView()
-            return chat_view.post(mock_request)
-            
-        elif data == "guion":
-            # Manejar generación de guión
-            mock_request = type('MockRequest', (), {
-                'data': {'chat_id': chat_id}
-            })()
-            titulo_view = SeleccionarTituloGuion()
-            return titulo_view.post(mock_request)
-            
-        elif data == "modificar":
-            # Manejar modificación de guión
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text="Envía el título del guión que quieres modificar:"
-            )
-            
-        elif data == "soporte":
-            # Manejar soporte GPT web
-            mock_request = type('MockRequest', (), {
-                'data': {'chat_id': chat_id}
-            })()
-            soporte_view = SoporteGPT()
-            return soporte_view.post(mock_request)
-        
-        return Response({"status": "callback_handled"})
-
-class BienvenidaView(APIView):
-    def post(self, request):
-        bot = Bot(token=settings.BOT_TOKEN)
-        chat_id = request.data.get("chat_id")
-        async_to_sync(bot.sendMessage)(
-            chat_id=chat_id,
-            text="Bienvenido al VECO, entra al siguiente link para introducir tu nombre y la clave"
-            " secreta",
-        )
-        return Response({"respuesta": f"Esperando clave {status.HTTP_100_CONTINUE}"})
 
 class VerificarClaveView(APIView):
+    """Vista de verificación de clave mejorada"""
+    
     def post(self, request):
         clave_secreta = request.data.get("clave_secreta")
         username = request.data.get("username")
         chat_id = request.data.get("chat_id")
-        bot = Bot(token=settings.BOT_TOKEN)
         
-        if clave_secreta != clave_acceso_bot:
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id,
-                text=f"Verificación de clave incorrecta, intente de nuevo"
+        # Validaciones
+        if not all([clave_secreta, username, chat_id]):
+            return Response(
+                {"error": "clave_secreta, username y chat_id son requeridos"},
+                status=status.HTTP_400_BAD_REQUEST
             )
-            return Response({
-                "respuesta": f"Verificación incorrecta, {status.HTTP_401_UNAUTHORIZED}"
-            })
         
-        async_to_sync(bot.send_message)(
+        # Verificar clave
+        if clave_secreta != settings.FMSPORTS_KEY:
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=MessageTemplates.AUTH_FAILED,
+                parse_mode="Markdown"
+            )
+            
+            logger.warning(f"Intento de autenticación fallido para {username} (chat_id: {chat_id})")
+            
+            return Response(
+                {"error": "Clave incorrecta"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Crear sesión
+        if UserSessionManager.create_session(chat_id, username):
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=MessageTemplates.AUTH_SUCCESS.format(username=username),
+                reply_markup=TelegramMenuBuilder.get_main_menu(),
+                parse_mode="Markdown"
+            )
+            
+            return Response({
+                "status": "authenticated",
+                "username": username,
+                "session_timeout": USER_SESSION_TIMEOUT
+            })
+        else:
+            return Response(
+                {"error": "Error creando sesión"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class MostrarMenuView(AuthenticationMixin, APIView):
+    """Vista de menú principal mejorada"""
+    
+    def post(self, request):
+        chat_id = request.data.get("chat_id")
+        session = UserSessionManager.get_session(chat_id)
+        username = session.get('username', 'Usuario')
+        
+        success = bot_service.send_message_sync(
             chat_id=chat_id,
-            text=f"Atención a la música! Bienvenido {username}, ¿qué necesitas de mi?",
-            reply_markup=obtener_menu_inline(),
+            text=f"🎭 **¡Hola {username}!**\n\n¿Qué necesitas del VECO hoy?",
+            reply_markup=TelegramMenuBuilder.get_main_menu(),
+            parse_mode="Markdown"
         )
+        
+        if success:
+            return Response({"status": "menu_sent"})
+        else:
+            return Response(
+                {"error": "Error enviando menú"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
-        return Response({
-            "respuesta": f"Verificación de clave correcta, {status.HTTP_202_ACCEPTED}"
-        })
 
-def obtener_documentos_google_docs(titulo_busqueda=None):
-    creds = service_account.Credentials.from_service_account_file(
-        settings.GOOGLE_CREDS_PATH,
-        scopes=SCOPES
-    )
-    service = build('drive', 'v3', credentials=creds)
-
-    # Filtro base: documentos dentro de la carpeta
-    filtro_base = f"'{settings.GOOGLE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.document'"
-
-    resultados = service.files().list(
-        q=filtro_base,
-        pageSize=10,
-        fields="files(id,name)"
-    ).execute()
-
-    archivos = resultados.get("files", [])
-    # Si se proporciona un titulo
-    if titulo_busqueda:
-        titulo_busqueda = titulo_busqueda.strip().lower()
-        archivos = [a for a in archivos if a['name'].strip().lower() == titulo_busqueda]
-    return archivos
-
-class SolicitarModificar(APIView):
+class SolicitarModificar(AuthenticationMixin, APIView):
+    """Vista para solicitar modificación de guión"""
+    
     def post(self, request):
         chat_id = request.data.get("chat_id")
         titulo = request.data.get('titulo')
-        bot = Bot(token=settings.BOT_TOKEN)
         
         if not chat_id:
             return Response(
@@ -459,194 +511,476 @@ class SolicitarModificar(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         
-        archivos = obtener_documentos_google_docs(titulo_busqueda=titulo)
-        
-        if not archivos:
-            async_to_sync(bot.send_message)(
-                chat_id=chat_id, 
-                text="No hay archivos con ese nombre. Verifica el título e intenta nuevamente"
-            )
-            return Response({"status": "archivo_no_encontrado"})
+        archivos = GoogleDriveService.obtener_documentos(titulo_busqueda=titulo)
 
-        botones = [
-            [
-                InlineKeyboardButton(
-                    archivo["name"],
-                    callback_data=f"archivo_{archivo['id']}",
-                )
-            ]
-            for archivo in archivos
-        ]
-        markup = InlineKeyboardMarkup(botones)
-        async_to_sync(bot.send_message)(
+        if not archivos:
+            bot_service.send_message_sync(
+                chat_id=chat_id, 
+                text=MessageTemplates.DOCUMENT_NOT_FOUND.format(titulo=titulo),
+                parse_mode="Markdown"
+            )
+            return Response(
+                {"status": "No se encontraron documentos"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        markup = TelegramMenuBuilder.get_document_selection_menu(archivos)
+        bot_service.send_message_sync(
             chat_id=chat_id,
-            text="Selecciona un archivo para modificar: ",
+            text=MessageTemplates.DOCUMENT_SELECT,
             reply_markup=markup,
+            parse_mode="Markdown"
         )
 
-        return Response({"status": "mensaje enviado"})
+        return Response({"status": "Archivos enviados"})
 
-class getFileId(APIView):
+
+class getFileId(AuthenticationMixin, APIView):
+    """Vista para obtener ID de archivo"""
+    
     def post(self, request):
         file_id = request.data.get("file_id")
         file_idSplitted = file_id.replace("archivo_", "")
         return Response({"id": file_idSplitted})
 
-class SoporteGPT(APIView):
+
+class SoporteInlineView(AuthenticationMixin, APIView):
+    """Vista de soporte inline conectada a n8n webhook"""
+    
     def post(self, request):
         chat_id = request.data.get("chat_id")
-        bot = Bot(token=settings.BOT_TOKEN)
+        action = request.data.get("action", "init")
+        message = request.data.get("message", "")
+        
+        if action == "init":
+            # Activar modo soporte y verificar conexión
+            webhook_status = N8nWebhookService.test_webhook_connection()
+            
+            if not webhook_status:
+                bot_service.send_message_sync(
+                    chat_id=chat_id,
+                    text="❌ **Servicio temporalmente no disponible**\n\nEl asistente IA está experimentando problemas técnicos. Por favor intenta más tarde.",
+                    parse_mode="Markdown"
+                )
+                return Response({
+                    "error": "webhook_unavailable",
+                    "status": "service_unavailable"
+                })
+            
+            UserSessionManager.update_session(chat_id, is_support_mode=True)
+            
+            success = bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=MessageTemplates.SUPPORT_WELCOME,
+                reply_markup=TelegramMenuBuilder.get_support_menu(),
+                parse_mode="Markdown"
+            )
+            
+            return Response({
+                "status": "support_mode_activated",
+                "webhook_status": "connected"
+            })
+        
+        elif action == "chat":
+            # Procesar mensaje de chat a través de n8n
+            return self._process_support_message(chat_id, message)
+        
+        elif action == "exit":
+            # Salir del modo soporte
+            UserSessionManager.update_session(chat_id, is_support_mode=False)
+            
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text="✅ **Modo soporte desactivado**\n\n¿Necesitas algo más?",
+                reply_markup=TelegramMenuBuilder.get_main_menu(),
+                parse_mode="Markdown"
+            )
+            
+            return Response({"status": "support_mode_deactivated"})
+    
+    def _process_support_message(self, chat_id: int, message: str) -> Response:
+        """Procesar mensaje de soporte a través del webhook de n8n"""
+        try:
+            # Verificar comandos especiales primero
+            if message.startswith('/'):
+                return self._handle_support_command(chat_id, message)
+            
+            # Obtener información del usuario
+            session = UserSessionManager.get_session(chat_id)
+            username = session.get('username', f'user_{chat_id}')
+            
+            # Actualizar contador de conversaciones y última actividad
+            conversation_count = session.get('conversation_count', 0) + 1
+            UserSessionManager.update_session(
+                chat_id,
+                conversation_count=conversation_count,
+                last_activity=datetime.now().isoformat()
+            )
+            
+            # Enviar indicador de "escribiendo..."
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text="🤖 _Procesando tu consulta..._",
+                parse_mode="Markdown"
+            )
+            
+            # Enviar mensaje al webhook de n8n
+            webhook_response = N8nWebhookService.send_chat_message(
+                chat_id=chat_id,
+                message=message,
+                username=username
+            )
+            
+            if webhook_response["success"]:
+                # Formatear respuesta del asistente
+                ai_response = webhook_response["response"]
+                
+                # Limitar longitud de respuesta para Telegram
+                if len(ai_response) > 4000:
+                    ai_response = ai_response[:3900] + "\n\n_[Respuesta truncada por longitud]_"
+                
+                formatted_response = f"🤖 **Asistente VECO:**\n\n{ai_response}"
+                
+                success = bot_service.send_message_sync(
+                    chat_id=chat_id,
+                    text=formatted_response,
+                    parse_mode="Markdown"
+                )
+                
+                if success:
+                    return Response({
+                        "status": "response_sent",
+                        "response": ai_response,
+                        "conversation_count": conversation_count,
+                        "webhook_data": webhook_response.get("data", {})
+                    })
+                else:
+                    return Response({
+                        "error": "telegram_send_failed",
+                        "ai_response": ai_response
+                    })
+                    
+            else:
+                # Manejar diferentes tipos de errores del webhook
+                error_type = webhook_response.get("error", "unknown")
+                error_message = webhook_response.get("message", "Error desconocido")
+                
+                if error_type == "timeout":
+                    response_text = "⏰ **Tiempo de espera agotado**\n\nEl asistente está tardando más de lo normal. ¿Podrías reformular tu pregunta o intentar más tarde?"
+                elif error_type == "connection_error":
+                    response_text = "🔌 **Problema de conexión**\n\nNo puedo conectar con el asistente ahora. Intenta de nuevo en unos minutos."
+                else:
+                    response_text = f"❌ **Error técnico**\n\n{error_message}\n\n¿Podrías intentar con una pregunta diferente?"
+                
+                bot_service.send_message_sync(
+                    chat_id=chat_id,
+                    text=response_text,
+                    parse_mode="Markdown"
+                )
+                
+                return Response({
+                    "error": error_type,
+                    "message": error_message,
+                    "status": "webhook_error"
+                })
+                
+        except Exception as e:
+            logger.error(f"Error procesando mensaje de soporte para chat_id {chat_id}: {e}")
+            
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text="💥 **Error interno**\n\nHubo un problema técnico. El equipo ha sido notificado.\n\nPuedes intentar:\n• Reformular tu pregunta\n• Usar `/menu` para volver al menú\n• Contactar soporte técnico",
+                parse_mode="Markdown"
+            )
+            
+            return Response({
+                "error": "internal_server_error",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def _handle_support_command(self, chat_id: int, command: str) -> Response:
+        """Manejar comandos especiales del soporte"""
+        session = UserSessionManager.get_session(chat_id)
+        
+        if command == "/menu":
+            UserSessionManager.update_session(chat_id, is_support_mode=False)
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text="🔙 Volviendo al menú principal...",
+                reply_markup=TelegramMenuBuilder.get_main_menu()
+            )
+            
+        elif command == "/help":
+            help_text = """
+🆘 **Ayuda del Soporte IA - VECO**
 
-        # Ofrecer ambas opciones de chat
-        async_to_sync(bot.send_message)(
-            chat_id=chat_id,
-            text="Selecciona cómo quieres acceder al asistente de IA:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Chat Directo", callback_data="chat_directo")],
-                [InlineKeyboardButton("🌐 Chat Web", url=settings.CHAT_WEBHOOK)],
-                [InlineKeyboardButton("🔙 Volver al menú", callback_data="menu")]
-            ])
-        )
+**Comandos disponibles:**
+• `/menu` - Volver al menú principal
+• `/help` - Mostrar esta ayuda
+• `/status` - Estado del asistente
 
-        return Response({"status": "opciones_chat_enviadas"})
+**¿Cómo funciona?**
+Estás conectado a un asistente IA especializado en FMSPORTS a través de n8n. Simplemente escribe tu pregunta en lenguaje natural.
 
-class SeleccionarTituloGuion(APIView):
+**Tipos de consulta que puedo resolver:**
+• 📝 Ayuda con guiones deportivos
+• 🔧 Soporte técnico de la plataforma
+• 📊 Consultas sobre procesos FMSPORTS
+• 💡 Ideas creativas para contenido
+• ❓ Preguntas generales
+
+**Ejemplos de preguntas:**
+• "¿Cómo escribir un guión para un partido de fútbol?"
+• "Necesito ideas para introducir un partido"
+• "¿Cuáles son las mejores prácticas para narración deportiva?"
+
+¡Pregunta lo que necesites!
+            """
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=help_text,
+                parse_mode="Markdown"
+            )
+            
+        elif command == "/status":
+            # Verificar estado del webhook
+            webhook_status = N8nWebhookService.test_webhook_connection()
+            conversation_count = session.get('conversation_count', 0)
+            last_activity = session.get('last_activity', 'N/A')
+            
+            status_text = f"""
+📊 **Estado del Asistente IA**
+
+**Conexión n8n:** {'🟢 Conectado' if webhook_status else '🔴 Desconectado'}
+**Conversaciones esta sesión:** {conversation_count}
+**Última actividad:** {last_activity}
+**Modo soporte:** {'🟢 Activo' if session.get('is_support_mode') else '🔴 Inactivo'}
+
+**Webhook URL:** `{N8N_CHAT_WEBHOOK_URL[:50]}...`
+
+{'✅ Todo funcionando correctamente' if webhook_status else '⚠️ Problemas de conectividad detectados'}
+            """
+            
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=status_text,
+                parse_mode="Markdown"
+            )
+            
+        else:
+            bot_service.send_message_sync(
+                chat_id=chat_id,
+                text=f"❓ Comando desconocido: `{command}`\n\nUsa `/help` para ver comandos disponibles.",
+                parse_mode="Markdown"
+            )
+        
+        return Response({"status": "command_processed", "command": command})
+
+
+class SeleccionarTituloGuion(AuthenticationMixin, APIView):
+    """Vista para seleccionar título del guión"""
+    
     def post(self, request):
         chat_id = request.data.get("chat_id")
-        bot = Bot(token=settings.BOT_TOKEN)
-        async_to_sync(bot.send_message)(
+        
+        if not chat_id:
+            return Response(
+                {"error": "chat_id es requerido"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        bot_service.send_message_sync(
             chat_id=chat_id,
-            text="¿Desea el guión con un nombre personalizado o uno designado por el sistema?",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            text="Nombre personalizado",
-                            callback_data="nombre_personalizado",
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="Designado por el bot", 
-                            callback_data="nombre_default"
-                        )
-                    ],
-                ]
-            ),
+            text="¿Cómo deseas nombrar tu guión?",
+            reply_markup=TelegramMenuBuilder.get_title_selection_menu(),
+            parse_mode="Markdown"
         )
-        return Response({"seleccion": "recibida"})
+        
+        return Response(
+            {"status": "Solicitud de nombre enviada"},
+            status=status.HTTP_200_OK
+        )
 
-def crearDocumento(drive_service, titulo, contenido):
-    archivo_metadata = {
-        "name": f"{titulo}",
-        "mimeType": "application/vnd.google-apps.document",
-        "parents": [settings.GOOGLE_FOLDER_ID],
-    }
 
-    media = MediaIoBaseUpload(
-       io.BytesIO(contenido.encode("utf-8")),
-       mimetype="text/html",
-       resumable=True
-   )
-    archivo = (drive_service.files().create(
-        body=archivo_metadata,
-        media_body=media,
-        fields="id",
-    ).execute())
-    return archivo.get("id")
-
-class CrearGuionView(APIView):
+class CrearGuionView(AuthenticationMixin, APIView):
+    """Vista para crear guión en Google Drive"""
+    
     def post(self, request):
-        bot = Bot(token=settings.BOT_TOKEN)
         chat_id = request.data.get("chat_id")
         prompt_content = request.data.get("content")
         titulo = request.data.get("titulo")
         
-        if not chat_id or not prompt_content:
+        # Validar parámetros obligatorios
+        if not all([chat_id, prompt_content]):
             return Response(
                 {"error": "chat_id y content son requeridos"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            # Autenticación
-            creds = service_account.Credentials.from_service_account_file(
-                settings.GOOGLE_CREDS_PATH,
-                scopes=[
-                    "https://www.googleapis.com/auth/drive",
-                    "https://www.googleapis.com/auth/documents",
-                ],
-            )
-            drive_service = build("drive", "v3", credentials=creds)
-            docs_service = build("docs", "v1", credentials=creds)
-            folder = (
-                drive_service.files()
-                .get(fileId=settings.GOOGLE_FOLDER_ID, fields="name")
-                .execute()
-            )
-            nombre_carpeta = folder.get("name", "Carpeta")
-            currDate = time.ctime(time.time())
+            # Obtener nombre de carpeta
+            service = GoogleDriveService.get_service()
+            folder_info = service.files().get(
+                fileId=settings.GOOGLE_FOLDER_ID,
+                fields="name"
+            ).execute()
             
-            # Crear el título
-            if titulo:
-                crearDocumento(drive_service, titulo, prompt_content)
-                # Enviar mensaje informativo al usuario
-                async_to_sync(bot.send_message)(
-                    chat_id=chat_id,
-                    text=f"✅ Tu guión *{titulo}* fue creado exitosamente en la carpeta *{nombre_carpeta}* de Google Drive.",
-                    parse_mode="Markdown",
-                )
-
-                return Response({
-                    "status": "Documento creado",
-                    "fileName": f"{titulo}",
-                    "dateCreated": currDate,
-                    "folderId": settings.GOOGLE_FOLDER_ID
-                })
-
-            fecha = datetime.now().strftime("%Y-%m-%d")
-            titulo_auto = f"Guión FMSPORTS {fecha}"
-            crearDocumento(
-                drive_service=drive_service,
-                titulo=titulo_auto,
-                contenido=prompt_content,
+            nombre_carpeta = folder_info.get("name", "Carpeta VECO")
+            currDate = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Generar título si no se proporciona
+            if not titulo:
+                titulo = f"Guion FMSPORTS - {datetime.now().strftime('%Y-%m-%d')}"
+            
+            # Crear documento
+            doc_id = GoogleDriveService.crear_documento(
+                titulo=titulo,
+                contenido=prompt_content
             )
-
-            # Enviar mensaje informativo al usuario
-            async_to_sync(bot.send_message)(
+            
+            # Enviar confirmación
+            bot_service.send_message_sync(
                 chat_id=chat_id,
-                text=f"✅ Tu guión *{titulo_auto}* fue creado exitosamente en la carpeta *{nombre_carpeta}* de Google Drive.",
+                text=MessageTemplates.DOCUMENT_CREATED.format(
+                    titulo=titulo,
+                    carpeta=nombre_carpeta,
+                    fecha=currDate
+                ),
                 parse_mode="Markdown",
             )
 
             return Response({
-                "status": "Documento creado",
-                "fileName": f"{titulo_auto}",
+                "status": "success",
+                "fileName": titulo,
                 "dateCreated": currDate,
-                "folderId": settings.GOOGLE_FOLDER_ID
+                "folderId": settings.GOOGLE_FOLDER_ID,
+                "docId": doc_id
             })
 
         except HttpError as error:
-            logger.error(f"Error al crear documento: {str(error)}")
-            async_to_sync(bot.send_message)(
+            error_details = error.content.decode('utf-8') if error.content else str(error)
+            bot_service.send_message_sync(
                 chat_id=chat_id, 
-                text="❌ Ocurrió un error al crear el documento."
+                text=MessageTemplates.DOCUMENT_ERROR.format(error=error_details),
+                parse_mode="Markdown"
             )
             return Response(
-                {"error": str(error)}, 
+                {"error": f"Google API Error: {error_details}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+        except Exception as e:
+            logger.error(f"Error al crear guión: {str(e)}")
+            bot_service.send_message_sync(
+                chat_id=chat_id, 
+                text=MessageTemplates.DOCUMENT_ERROR.format(error=str(e)),
+                parse_mode="Markdown"
+            )
+            return Response(
+                {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-# Funciones auxiliares
-def es_mensaje_chat(chat_id, message):
-    """
-    Determina si un mensaje debe ser procesado por el chat embedded
-    """
-    if chat_id in modo_soporte_usuarios:
-        return True
+
+class PerfilUsuarioView(AuthenticationMixin, APIView):
+    """Vista para mostrar perfil de usuario"""
     
-    # Palabras clave que activan el chat directo
-    keywords_chat = ['pregunta', 'ayuda', 'consulta', 'chat', 'ia', 'gpt']
-    message_lower = message.lower()
+    def post(self, request):
+        chat_id = request.data.get("chat_id")
+        session = UserSessionManager.get_session(chat_id)
+        
+        profile_text = f"""
+👤 **Tu Perfil VECO**
+
+**Usuario:** {session.get('username', 'N/A')}
+**Sesión creada:** {session.get('created_at', 'N/A')}
+**Modo soporte:** {'Activo' if session.get('is_support_mode') else 'Inactivo'}
+**Conversaciones IA:** {session.get('conversation_count', 0)}
+**Última actividad:** {session.get('last_activity', 'N/A')}
+
+🔧 **Opciones:**
+        """
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Estado del asistente", callback_data="profile:webhook_status")],
+            [InlineKeyboardButton("🔄 Reiniciar conversación IA", callback_data="profile:reset_conversation")],
+            [InlineKeyboardButton("🔙 Volver al menú", callback_data="action:menu")]
+        ])
+        
+        bot_service.send_message_sync(
+            chat_id=chat_id,
+            text=profile_text,
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        
+        return Response({"status": "profile_sent"})
+
+
+class WebhookStatusView(AuthenticationMixin, APIView):
+    """Vista para verificar estado del webhook de n8n"""
     
-    return any(keyword in message_lower for keyword in keywords_chat)
+    def post(self, request):
+        chat_id = request.data.get("chat_id")
+        
+        # Probar conexión con el webhook
+        webhook_status = N8nWebhookService.test_webhook_connection()
+        
+        # Obtener estadísticas de la sesión
+        session = UserSessionManager.get_session(chat_id)
+        conversation_count = session.get('conversation_count', 0)
+        
+        status_text = f"""
+🔗 **Estado del Webhook N8N**
+
+**URL:** `conexionai.app.n8n.cloud`
+**Estado:** {'🟢 Operativo' if webhook_status else '🔴 Sin conexión'}
+**Timeout configurado:** {WEBHOOK_TIMEOUT}s
+**Conversaciones esta sesión:** {conversation_count}
+
+**Asistente OpenAI:**
+{'✅ Disponible a través de n8n' if webhook_status else '❌ No disponible'}
+
+**Recomendaciones:**
+{
+'• Todo funcionando correctamente' if webhook_status 
+else '• Verifica tu conexión a internet\\n• Intenta de nuevo en unos minutos\\n• Contacta al administrador si persiste'
+}
+        """
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Probar conexión", callback_data="webhook:test")],
+            [InlineKeyboardButton("🔙 Volver al perfil", callback_data="action:perfil")]
+        ])
+        
+        bot_service.send_message_sync(
+            chat_id=chat_id,
+            text=status_text,
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        
+        return Response({
+            "status": "webhook_status_sent",
+            "webhook_connected": webhook_status,
+            "conversation_count": conversation_count
+        })
+
+
+class LogoutView(AuthenticationMixin, APIView):
+    """Vista para cerrar sesión"""
+    
+    def post(self, request):
+        chat_id = request.data.get("chat_id")
+        session = UserSessionManager.get_session(chat_id)
+        username = session.get('username', 'Usuario') if session else 'Usuario'
+        
+        UserSessionManager.destroy_session(chat_id)
+        
+        bot_service.send_message_sync(
+            chat_id=chat_id,
+            text=f"👋 **¡Hasta luego {username}!**\n\nTu sesión ha sido cerrada correctamente.\n\nPara volver a usar el VECO, simplemente envía /start",
+            parse_mode="Markdown"
+        )
+        
+        return Response({"status": "logged_out"})

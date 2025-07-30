@@ -281,14 +281,6 @@ class TelegramMenuBuilder:
         ])
     
     @staticmethod
-    def get_auth_menu() -> InlineKeyboardMarkup:
-        """Menú de autenticación"""
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔐 Ingresar clave", callback_data="auth:enter_key")],
-            [InlineKeyboardButton("❓ ¿Olvidaste tu clave?", callback_data="auth:forgot_key")]
-        ])
-    
-    @staticmethod
     def get_document_selection_menu(archivos: List[Dict]) -> InlineKeyboardMarkup:
         """Menú para selección de documentos"""
         botones = [
@@ -410,7 +402,6 @@ class BienvenidaView(APIView):
             success = bot_service.send_message_sync(
                 chat_id=chat_id,
                 text=MessageTemplates.WELCOME,
-                reply_markup=TelegramMenuBuilder.get_auth_menu(),
                 parse_mode="Markdown"
             )
         

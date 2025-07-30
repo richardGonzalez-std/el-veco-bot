@@ -24,7 +24,7 @@ SECRET_KEY = 'django-insecure-t3q5hjtwozc&^*-^u0gn&^#@44r3m9dy%5b(j^1v3+oq6o=siz
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
-
+FMSPORTS_KEY = "FMSPORTS2025"
 ALLOWED_HOSTS = [
     "*",
     "https://statute-competitive-doll-compatible.trycloudflare.com",

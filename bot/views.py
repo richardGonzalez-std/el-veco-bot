@@ -220,7 +220,7 @@ class SoporteGPT(APIView):
         return Response({
             "chat": "Abierto", 
             "status": "inline_activated",
-            "webhook_url": settings.WEBHOOK_URL,  # URL del n8n Chat Trigger
+            "webhook_url": settings.CHAT_WEBHOOK,  # URL del n8n Chat Trigger
             "session_id": f"support_{chat_id}_{int(time.time())}"
         })
 

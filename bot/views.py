@@ -38,7 +38,7 @@ class MessageTemplates:
     
     AUTH_FAILED = "❌ **Clave incorrecta**\n\nPor favor, verifica tu clave e intenta nuevamente."
     
-    SUPPORT_WELCOME = "🤖 **Soporte IA Inline Activado**\n\nAhora puedes chatear directamente conmigo a través de tu asistente personalizado de n8n.\n\nSimplemente escribe tu consulta y te responderé de inmediato.\n\n💡 **Comandos disponibles:**\n• `/menu` - Volver al menú principal\n• `/help` - Ver ayuda\n• `/status` - Estado del asistente\n\n🎯 **Especialidades:**\n• Ayuda con guiones deportivos\n• Soporte técnico de la plataforma\n• Consultas sobre FMSPORTS"
+    SUPPORT_WELCOME = "🤖 **Soporte IA Inline Activado**\n\nAhora puedes chatear directamente conmigo a través de tu asistente personalizado de n8n.\n\nSimplemente escribe tu consulta y te responderé de inmediato.\n\n💡"
     
     SESSION_EXPIRED = "⏰ **Sesión expirada**\n\nTu sesión ha caducado por inactividad. Por favor, auténticate nuevamente."
 
@@ -87,6 +87,12 @@ class BienvenidaView(APIView):
     def post(self, request):
         bot = Bot(token=settings.BOT_TOKEN)
         chat_id = request.data.get("chat_id")
+        if chat_id in threads_usuarios:
+            async_to_sync(bot.sendMessage)(
+                chat_id=chat_id,
+                text=MessageTemplates.AUTH_SUCCESS.format(username=request.data.get("username")),
+            )
+            return Response({"respuesta": "Usuario ya autenticado"})
         async_to_sync(bot.sendMessage)(
             chat_id=chat_id,
             text=MessageTemplates.WELCOME,
@@ -159,6 +165,12 @@ class SolicitarModificar(APIView):
                 text=MessageTemplates.SESSION_EXPIRED
             )
             return Response({"error": "Sesión expirada"}, status=status.HTTP_401_UNAUTHORIZED)
+        if chat_id in modo_soporte_usuarios:
+            async_to_sync(bot.send_message)(
+                chat_id=chat_id,
+                text="No puedes modificar archivos mientras estás en modo soporte."
+            )
+            return Response({"error": "Modo soporte activo"}, status=status.HTTP_403_FORBIDDEN)
         archivos = obtener_documentos_google_docs(titulo_busqueda=titulo)
         if not chat_id:
             return Response(
@@ -233,7 +245,6 @@ class N8nChatHandler(APIView):
         try:
             chat_id = request.data.get("chat_id")
             mensaje = request.data.get("message")
-            session_id = request.data.get("session_id", f"support_{chat_id}")
             
             if not chat_id or not mensaje:
                 return Response(
@@ -249,13 +260,12 @@ class N8nChatHandler(APIView):
                 )
             
             # Enviar mensaje al n8n Chat Trigger
-            respuesta = self._enviar_a_n8n_chat(mensaje, session_id, chat_id)
+            respuesta = self._enviar_a_n8n_chat(mensaje,  chat_id)
             
             if respuesta:
                 return Response({
                     "status": "success",
                     "response": respuesta.get("output", "Sin respuesta"),
-                    "session_id": respuesta.get("sessionId", session_id)
                 })
             else:
                 return Response(
@@ -270,13 +280,13 @@ class N8nChatHandler(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    def _enviar_a_n8n_chat(self, mensaje, session_id, chat_id):
+    def _enviar_a_n8n_chat(self, mensaje,  chat_id):
         """Envía mensaje al n8n Chat Trigger y retorna la respuesta"""
         try:
             # Payload en el formato que espera n8n Chat Trigger
             payload = {
                 "chatInput": mensaje,
-                "sessionId": session_id,
+                
                 "action": "sendMessage",
                 # Datos adicionales para tu workflow
                 "metadata": {
@@ -324,7 +334,8 @@ class N8nWebhookReceiver(APIView):
     
     def post(self, request):
         try:
-            session_id = request.data.get("sessionId")
+            # Aquí puedes procesar el callback de n8n
+            # Por ejemplo, enviar una respuesta al usuario de Telegram
             output = request.data.get("output")
             chat_id = request.data.get("telegram_chat_id")
             
@@ -348,7 +359,7 @@ class N8nWebhookReceiver(APIView):
 
 
 class SeleccionarTituloGuion(APIView):
-    def post(self, request):
+    def post(self, request): 
         chat_id = request.data.get("chat_id")
         bot = Bot(token=settings.BOT_TOKEN)
         if not is_session_active(chat_id):
@@ -357,6 +368,13 @@ class SeleccionarTituloGuion(APIView):
                 text=MessageTemplates.SESSION_EXPIRED
             )
             return Response({"error": "Sesión expirada"}, status=status.HTTP_401_UNAUTHORIZED)
+        if chat_id in modo_soporte_usuarios:
+            async_to_sync(bot.send_message)(
+                chat_id=chat_id,
+                text="No puedes seleccionar un título mientras estás en modo soporte."
+            )
+            return Response({"error": "Modo soporte activo"}, status=status.HTTP_403_FORBIDDEN)
+        # Enviar mensaje con opciones de título
         async_to_sync(bot.send_message)(
             chat_id=chat_id,
             text="Desea el guión con un nombre personalizado o una designado por el sistema?",
@@ -405,6 +423,12 @@ class CrearGuionView(APIView):
         chat_id = request.data.get("chat_id")
         prompt_content = request.data.get("content")
         titulo = request.data.get("titulo")
+        if chat_id in modo_soporte_usuarios:
+            async_to_sync(bot.send_message)(
+                chat_id=chat_id,
+                text="No puedes crear un guión mientras estás en modo soporte."
+            )
+            return Response({"error": "Modo soporte activo"}, status=status.HTTP_403_FORBIDDEN)
         if not is_session_active(chat_id):
             async_to_sync(bot.send_message)(
                 chat_id=chat_id,
